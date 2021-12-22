@@ -1,6 +1,8 @@
 #include <SDL.h>
 #include <SDL_syswm.h>
 
+#include <tiny_obj_loader.h>
+
 #include <Windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -148,11 +150,11 @@ public:
         D3D11_RASTERIZER_DESC rasterDesc;
         ZeroMemory(&rasterDesc, sizeof(rasterDesc));
         rasterDesc.AntialiasedLineEnable = false;
-        rasterDesc.CullMode = D3D11_CULL_NONE; //D3D11_CULL_BACK;
+        rasterDesc.CullMode = D3D11_CULL_BACK;
         rasterDesc.DepthBias = 0;
         rasterDesc.DepthBiasClamp = 0.0f;
         rasterDesc.DepthClipEnable = true;
-        rasterDesc.FillMode = D3D11_FILL_WIREFRAME;
+        rasterDesc.FillMode = D3D11_FILL_SOLID;
         rasterDesc.FrontCounterClockwise = false;
         rasterDesc.MultisampleEnable = false;
         rasterDesc.ScissorEnable = false;
@@ -330,7 +332,7 @@ private:
 
         RETURN_FALSE_IF(result);
 
-        D3D11_INPUT_ELEMENT_DESC layoutDesc[2] = {0};
+        D3D11_INPUT_ELEMENT_DESC layoutDesc[4] = {0};
         layoutDesc[0].SemanticName = "POSITION";
         layoutDesc[0].SemanticIndex = 0;
         layoutDesc[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -339,15 +341,31 @@ private:
         layoutDesc[0].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
         layoutDesc[0].InstanceDataStepRate = 0;
 
-        layoutDesc[1].SemanticName = "COLOR";
+        layoutDesc[1].SemanticName = "NORMAL";
         layoutDesc[1].SemanticIndex = 0;
-        layoutDesc[1].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        layoutDesc[1].Format = DXGI_FORMAT_R32G32B32_FLOAT;
         layoutDesc[1].InputSlot = 0;
         layoutDesc[1].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
         layoutDesc[1].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
         layoutDesc[1].InstanceDataStepRate = 0;
 
-        result = DEVICE.GetDevice()->CreateInputLayout(layoutDesc, 2, bytecode->GetBufferPointer(), bytecode->GetBufferSize(), &m_IL);
+        layoutDesc[2].SemanticName = "TEXCOORD";
+        layoutDesc[2].SemanticIndex = 0;
+        layoutDesc[2].Format = DXGI_FORMAT_R32G32_FLOAT;
+        layoutDesc[2].InputSlot = 0;
+        layoutDesc[2].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+        layoutDesc[2].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        layoutDesc[2].InstanceDataStepRate = 0;
+
+        layoutDesc[3].SemanticName = "COLOR";
+        layoutDesc[3].SemanticIndex = 0;
+        layoutDesc[3].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        layoutDesc[3].InputSlot = 0;
+        layoutDesc[3].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+        layoutDesc[3].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        layoutDesc[3].InstanceDataStepRate = 0;
+
+        result = DEVICE.GetDevice()->CreateInputLayout(layoutDesc, 4, bytecode->GetBufferPointer(), bytecode->GetBufferSize(), &m_IL);
         RETURN_FALSE_IF(result);
 
         D3D11_BUFFER_DESC constantDesc;
@@ -398,11 +416,15 @@ private:
 
 class Mesh
 {
+    using IndexType_t = unsigned long;
+
 public:
     struct Vertex
     {
-        DirectX::XMFLOAT3 pos;
-        DirectX::XMFLOAT4 color;
+        XMFLOAT3 pos;
+        XMFLOAT3 normal;
+        XMFLOAT2 texCoord;
+        XMFLOAT4 color;
     };
 
 public:
@@ -412,7 +434,7 @@ public:
         COM_RELEASE(m_IB);
     }
 
-    bool Create(const std::vector<Vertex>& vertices, const std::vector<unsigned long>& indices)
+    bool Create(const std::vector<Vertex>& vertices, const std::vector<IndexType_t>& indices)
     {
         if (CreateBuffer(sizeof(Vertex) * static_cast<UINT>(vertices.size()), vertices.data(), &m_VB, D3D11_BIND_VERTEX_BUFFER))
         {
@@ -424,8 +446,71 @@ public:
 
     bool Create(const std::string& path)
     {
-        //#TODO:
-        return false;
+        tinyobj::attrib_t attrib;
+        
+        std::vector<tinyobj::shape_t> shapes;
+        std::vector<tinyobj::material_t> materials;
+
+        std::string warn;
+        std::string err;
+        
+        if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str()))
+        {
+            std::cout << "tinyobj ERROR: " << err << std::endl;
+            return false;
+        }
+
+        if (!warn.empty())
+        {
+            std::cout << "tinyobj WARNING: " << warn << std::endl;
+        }
+
+        std::vector<Vertex> vertices;
+        std::vector<IndexType_t> indices;
+
+        std::map<unsigned long, Vertex> verticesDB;
+        for (const tinyobj::shape_t& shape : shapes)
+        {
+            for (const tinyobj::index_t& index : shape.mesh.indices)
+            {
+                int vIdx = index.vertex_index;
+                int nIdx = index.normal_index;
+
+                // Hashing: https://stackoverflow.com/questions/682438/hash-function-providing-unique-uint-from-an-integer-coordinate-pair
+                // Hashing: http://szudzik.com/ElegantPairing.pdf
+
+                const unsigned long hash = Hash(vIdx, nIdx);
+
+                auto it = verticesDB.find(hash);
+                if (it == verticesDB.end())
+                {
+                    XMFLOAT3 vertex
+                    {
+                        attrib.vertices[vIdx],
+                        attrib.vertices[vIdx + 1],
+                        attrib.vertices[vIdx + 2]
+                    };
+
+                    XMFLOAT3 normal
+                    {
+                        attrib.normals[nIdx],
+                        attrib.normals[nIdx + 1],
+                        attrib.normals[nIdx + 2]
+                    };
+
+                    Vertex vtx;
+                    vtx.pos = vertex;
+                    vtx.normal = normal;
+
+                    verticesDB[hash] = vtx;
+                }
+
+                indices.push_back(std::distance(verticesDB.begin(), it));
+            }
+        }
+
+        //#TODO: vertices.assign(verticesDB.begin(), verticesDB.end());
+        return Create(vertices, indices);
     }
 
     void Bind()
@@ -439,6 +524,10 @@ public:
     }
 
 private:
+    unsigned long Hash(int a, int b)
+    {
+        return a >= b ? a * a + a + b : a + b * b;
+    }
     bool CreateBuffer(UINT bytes, const void* data, ID3D11Buffer** buffer, D3D11_BIND_FLAG bindFlags) const
     {
         D3D11_BUFFER_DESC desc;
@@ -507,9 +596,9 @@ public:
         {
             std::vector<Mesh::Vertex> vertices
             {
-                Mesh::Vertex{XMFLOAT3{0.0f, 1.0f, 0.0f}, XMFLOAT4{1.0f, 0.0f, 0.0f, 1.0f}},
-                Mesh::Vertex{XMFLOAT3{1.0f, -1.0f, 0.0f}, XMFLOAT4{0.0f, 1.0f, 0.0f, 1.0f}},
-                Mesh::Vertex{XMFLOAT3{-1.0f, -1.0f, 0.0f}, XMFLOAT4{0.0f, 0.0f, 1.0f, 1.0f}}
+                Mesh::Vertex{XMFLOAT3{-1.0f, -1.0f, 0.0f}, XMFLOAT3{}, XMFLOAT2{}, XMFLOAT4{0.0f, 0.0f, 1.0f, 1.0f}},
+                Mesh::Vertex{XMFLOAT3{1.0f, -1.0f, 0.0f}, XMFLOAT3{}, XMFLOAT2{}, XMFLOAT4{0.0f, 1.0f, 0.0f, 1.0f}},
+                Mesh::Vertex{XMFLOAT3{0.0f, 1.0f, 0.0f}, XMFLOAT3{}, XMFLOAT2{}, XMFLOAT4{1.0f, 0.0f, 0.0f, 1.0f}}
             };
 
             std::vector<unsigned long> indices
