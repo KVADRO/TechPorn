@@ -17,6 +17,9 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
+#include <array>
+#include <functional>
 
 using namespace DirectX;
 
@@ -25,6 +28,49 @@ if(FAILED(hresult)) { SDL_TriggerBreakpoint(); return false; }
 
 #define COM_RELEASE(com) \
 if(com) { com->Release(); com = nullptr; }
+
+/*template<typename T>
+class UniqueComPtr
+{
+public:
+    UniqueComPtr() = default;
+    UniqueComPtr(T* com)
+    : m_Com{ com }
+    {
+
+    }
+
+    ~UniqueComPtr()
+    {
+        COM_RELEASE(m_Com);
+    }
+
+    T* operator -> ()
+    {
+        return m_Com;
+    }
+
+    bool operator ! ()
+    {
+        return !m_Com;
+    }
+
+    T* Get() 
+    { 
+        return m_Com; 
+    }
+
+    void Reset(T* com)
+    {
+        COM_RELEASE(m_Com);
+        m_Com = com;
+    }
+
+private:
+    T* m_Com{ nullptr };
+};*/
+
+#pragma region Device 
 
 class Device
 {
@@ -90,7 +136,7 @@ public:
 
         COM_RELEASE(backBuffer);
 
-        // Create DB & DBV
+        /*// Create DB & DBV
 
         D3D11_TEXTURE2D_DESC depthBufferDesc;
         ZeroMemory(&depthBufferDesc, sizeof(depthBufferDesc));
@@ -143,7 +189,7 @@ public:
         RETURN_FALSE_IF(result);
 
         m_Contex->OMSetDepthStencilState(m_DSS, 1);
-        m_Contex->OMSetRenderTargets(1, &m_RTV, m_DSV);
+        m_Contex->OMSetRenderTargets(1, &m_RTV, m_DSV);*/
 
         // Rasterizer
 
@@ -189,7 +235,7 @@ public:
         };
 
         m_Contex->ClearRenderTargetView(m_RTV, clearColor);
-        m_Contex->ClearDepthStencilView(m_DSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
+        //m_Contex->ClearDepthStencilView(m_DSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
     }
 
     void Present()
@@ -199,6 +245,8 @@ public:
 
     ID3D11Device* GetDevice() { return m_Device; }
     ID3D11DeviceContext* GetContext() { return m_Contex; }
+    ID3D11RenderTargetView* GetRTV() const { return m_RTV; }
+
     const D3D11_VIEWPORT& GetViewport() const { return m_Viewport; }
 
 private:
@@ -226,16 +274,160 @@ Device& GetGlobalDevice()
 
 #define DEVICE GetGlobalDevice()
 
-template<typename T>
-class Shader
+#pragma endregion
+
+class DeferredBuffers
 {
 public:
-    virtual ~Shader()
+    enum BufferType
     {
-        COM_RELEASE(m_Shader);
+        NORMAL = 0,
+        COLOR,
+        COUNT
+    };
+
+public:
+    ~DeferredBuffers()
+    {
+        COM_RELEASE(m_DSV);
+        COM_RELEASE(m_DSS);
+        COM_RELEASE(m_Depth);
+
+        for (int i = 0; i < COUNT; ++i)
+        {
+            COM_RELEASE(m_SRV[i]);
+            COM_RELEASE(m_RTV[i]);
+            COM_RELEASE(m_Textures[i]);
+        }
     }
 
-    bool Create(const std::wstring& path, const std::string& entry)
+    bool Create()
+    {
+        D3D11_TEXTURE2D_DESC textureDesc;
+        ZeroMemory(&textureDesc, sizeof(textureDesc));
+        textureDesc.Width = DEVICE.GetViewport().Width;
+        textureDesc.Height = DEVICE.GetViewport().Height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        textureDesc.CPUAccessFlags = 0;
+        textureDesc.MiscFlags = 0;
+
+        D3D11_RENDER_TARGET_VIEW_DESC rtvDesc;
+        ZeroMemory(&rtvDesc, sizeof(rtvDesc));
+        rtvDesc.Format = textureDesc.Format;
+        rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        rtvDesc.Texture2D.MipSlice = 0;
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
+        ZeroMemory(&srvDesc, sizeof(srvDesc));
+        srvDesc.Format = textureDesc.Format;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = 1;
+
+        for (int i = 0; i < COUNT; ++i)
+        {
+            HRESULT result = DEVICE.GetDevice()->CreateTexture2D(&textureDesc, nullptr, &m_Textures[i]);
+            RETURN_FALSE_IF(result);
+
+            result = DEVICE.GetDevice()->CreateRenderTargetView(m_Textures[i], &rtvDesc, &m_RTV[i]);
+            RETURN_FALSE_IF(result);
+
+            result = DEVICE.GetDevice()->CreateShaderResourceView(m_Textures[i], &srvDesc, &m_SRV[i]);
+            RETURN_FALSE_IF(result);
+        }
+
+        D3D11_TEXTURE2D_DESC depthTextureDesc;
+        ZeroMemory(&depthTextureDesc, sizeof(depthTextureDesc));
+        depthTextureDesc.Width = DEVICE.GetViewport().Width;
+        depthTextureDesc.Height = DEVICE.GetViewport().Height;
+        depthTextureDesc.MipLevels = 1;
+        depthTextureDesc.ArraySize = 1;
+        depthTextureDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depthTextureDesc.SampleDesc.Count = 1;
+        depthTextureDesc.SampleDesc.Quality = 0;
+        depthTextureDesc.Usage = D3D11_USAGE_DEFAULT;
+        depthTextureDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        depthTextureDesc.CPUAccessFlags = 0;
+        depthTextureDesc.MiscFlags = 0;
+
+        HRESULT result = DEVICE.GetDevice()->CreateTexture2D(&depthTextureDesc, nullptr, &m_Depth);
+        RETURN_FALSE_IF(result);
+
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc;
+        ZeroMemory(&dsvDesc, sizeof(dsvDesc));
+        dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        dsvDesc.Texture2D.MipSlice = 0;
+
+        result = DEVICE.GetDevice()->CreateDepthStencilView(m_Depth, &dsvDesc, &m_DSV);
+        RETURN_FALSE_IF(result);
+
+        D3D11_DEPTH_STENCIL_DESC depthStencilDesc;
+        ZeroMemory(&depthStencilDesc, sizeof(depthStencilDesc));
+
+        depthStencilDesc.DepthEnable = true;
+        depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        depthStencilDesc.DepthFunc = D3D11_COMPARISON_LESS;
+
+        depthStencilDesc.StencilEnable = true;
+        depthStencilDesc.StencilReadMask = 0xFF;
+        depthStencilDesc.StencilWriteMask = 0xFF;
+
+        depthStencilDesc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+        depthStencilDesc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_INCR;
+        depthStencilDesc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
+        depthStencilDesc.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+
+        depthStencilDesc.BackFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+        depthStencilDesc.BackFace.StencilDepthFailOp = D3D11_STENCIL_OP_DECR;
+        depthStencilDesc.BackFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
+        depthStencilDesc.BackFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+
+        result = DEVICE.GetDevice()->CreateDepthStencilState(&depthStencilDesc, &m_DSS);
+        RETURN_FALSE_IF(result);
+
+        return true;
+    }
+
+    void Bind()
+    {
+        DEVICE.GetContext()->OMSetDepthStencilState(m_DSS, 1);
+        DEVICE.GetContext()->OMSetRenderTargets(COUNT, m_RTV.data(), m_DSV);
+    }
+
+    void Clear()
+    {
+        float color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        for (ID3D11RenderTargetView* rtv : m_RTV)
+        {
+            DEVICE.GetContext()->ClearRenderTargetView(rtv, color);
+        }
+
+        DEVICE.GetContext()->ClearDepthStencilView(m_DSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
+    }
+
+    ID3D11ShaderResourceView* GetSRV(BufferType type) { return m_SRV[type]; }
+
+private:
+    std::array<ID3D11Texture2D*, COUNT> m_Textures;
+    std::array<ID3D11RenderTargetView*, COUNT> m_RTV;
+    std::array<ID3D11ShaderResourceView*, COUNT> m_SRV;
+
+    ID3D11Texture2D* m_Depth{ nullptr };
+    ID3D11DepthStencilView* m_DSV{ nullptr };
+    ID3D11DepthStencilState* m_DSS{ nullptr };
+};
+
+#pragma region Shaders
+
+namespace shader_utils
+{
+    ID3D10Blob* Compile(const std::wstring& path, const std::string& entry, const std::string& target)
     {
         ID3D10Blob* bytecodeBuffer = nullptr;
         ID3D10Blob* errorBuffer = nullptr;
@@ -244,7 +436,7 @@ public:
             , nullptr
             , nullptr
             , entry.c_str()
-            , GetCompileTarget().c_str()
+            , target.c_str()
             , D3D10_SHADER_ENABLE_STRICTNESS
             , 0
             , &bytecodeBuffer
@@ -252,87 +444,118 @@ public:
 
         if (errorBuffer)
         {
-            PrintMessage(errorBuffer, path);
+            char buf[1024] = { 0 };
+            std::memcpy(buf, errorBuffer->GetBufferPointer(), std::min(1024, (int)errorBuffer->GetBufferSize()));
+            buf[1023] = 0;
+
+            std::wcout << L"HLSL [" << path << L"]: " << buf << std::endl;
         }
 
-        if (SUCCEEDED(result))
-        {
-            result = CreateShaderObject(bytecodeBuffer);
-        }
-
-        COM_RELEASE(bytecodeBuffer);
         COM_RELEASE(errorBuffer);
+        return bytecodeBuffer;
+    }
+}
 
+struct TransformConstantBuffer
+{
+    XMMATRIX world;
+    XMMATRIX view;
+    XMMATRIX projection;
+};
+
+template<typename T>
+class ScopedCOM
+{
+public:
+    ScopedCOM(T* com)
+        : m_Com{ com }
+    {
+
+    }
+
+    ~ScopedCOM()
+    {
+        COM_RELEASE(m_Com);
+    }
+
+private:
+    T* m_Com{ nullptr };
+};
+
+class GeometryPass
+{
+public:
+    bool Create()
+    {
+        if (!CreateVS() || !CreatePS())
+        {
+            return false;
+        }
+
+        D3D11_BUFFER_DESC constantDesc;
+        ZeroMemory(&constantDesc, sizeof(constantDesc));
+        constantDesc.Usage = D3D11_USAGE_DYNAMIC;
+        constantDesc.ByteWidth = sizeof(TransformConstantBuffer);
+        constantDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        constantDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        constantDesc.MiscFlags = 0;
+        constantDesc.StructureByteStride = 0;
+
+        HRESULT result = DEVICE.GetDevice()->CreateBuffer(&constantDesc, nullptr, &m_ConstantBuffer);
         return SUCCEEDED(result);
     }
 
-protected:
-    virtual bool CreateShaderObject(ID3D10Blob* bytecode) = 0;
-    virtual std::string GetCompileTarget() const = 0;
-
-    void PrintMessage(ID3D10Blob* buffer, const std::wstring& path)
+    void Bind(DeferredBuffers& buffers)
     {
-        std::wcout << L"HLSL [" << path << L"]: " << reinterpret_cast<LPWSTR>(buffer->GetBufferPointer()) << std::endl;
+        buffers.Clear();
+        buffers.Bind();
+
+        DEVICE.GetContext()->VSSetConstantBuffers(0, 1, &m_ConstantBuffer);
+        DEVICE.GetContext()->IASetInputLayout(m_IL);
+        DEVICE.GetContext()->VSSetShader(m_VS, nullptr, 0);
+        DEVICE.GetContext()->PSSetShader(m_PS, nullptr, 0);
     }
 
-protected:
-    T* m_Shader{ nullptr };
-};
-
-class VertexShader : public Shader<ID3D11VertexShader>
-{
-    using Parent_t = Shader<ID3D11VertexShader>;
-
-public:
-    struct ConstantBuffer
-    {
-        DirectX::XMMATRIX world;
-        DirectX::XMMATRIX view;
-        DirectX::XMMATRIX projection;
-    };
-
-public:
-    ~VertexShader()
-    {
-        COM_RELEASE(m_IL);
-        COM_RELEASE(m_ConstantBuffer);
-    }
-
-    bool SetConstantBuffer(ConstantBuffer buffer)
+    bool SetConstantBuffer(TransformConstantBuffer buffer)
     {
         buffer.world = XMMatrixTranspose(buffer.world);
         buffer.view = XMMatrixTranspose(buffer.view);
         buffer.projection = XMMatrixTranspose(buffer.projection);
 
         D3D11_MAPPED_SUBRESOURCE resource;
-        
+
         HRESULT result = DEVICE.GetContext()->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &resource);
         RETURN_FALSE_IF(result);
 
-        *reinterpret_cast<ConstantBuffer*>(resource.pData) = buffer;
+        *reinterpret_cast<TransformConstantBuffer*>(resource.pData) = buffer;
         DEVICE.GetContext()->Unmap(m_ConstantBuffer, 0);
 
         return true;
     }
 
-    void Bind()
-    {
-        DEVICE.GetContext()->VSSetConstantBuffers(0, 1, &m_ConstantBuffer);
-        DEVICE.GetContext()->IASetInputLayout(m_IL);
-        DEVICE.GetContext()->VSSetShader(m_Shader, nullptr, 0);
-    }
-
 private:
-    bool CreateShaderObject(ID3D10Blob* bytecode) override
+    bool CreateVS()
     {
+        ID3D10Blob* bytecode = shader_utils::Compile(L"vs_g_pass.hlsl", "VSGMain", "vs_5_0");
+        if (!bytecode)
+        {
+            return false;
+        }
+
         HRESULT result = DEVICE.GetDevice()->CreateVertexShader(bytecode->GetBufferPointer()
             , bytecode->GetBufferSize()
             , nullptr
-            , &m_Shader);
+            , &m_VS);
 
-        RETURN_FALSE_IF(result);
+        if (FAILED(result))
+        {
+            COM_RELEASE(bytecode);
+            return false;
+        }
 
-        D3D11_INPUT_ELEMENT_DESC layoutDesc[4] = {0};
+        std::array<D3D11_INPUT_ELEMENT_DESC, 4> layoutDesc;
+        ZeroMemory(layoutDesc.data(), layoutDesc.size() * sizeof(D3D11_INPUT_ELEMENT_DESC));
+
         layoutDesc[0].SemanticName = "POSITION";
         layoutDesc[0].SemanticIndex = 0;
         layoutDesc[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -365,66 +588,238 @@ private:
         layoutDesc[3].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
         layoutDesc[3].InstanceDataStepRate = 0;
 
-        result = DEVICE.GetDevice()->CreateInputLayout(layoutDesc, 4, bytecode->GetBufferPointer(), bytecode->GetBufferSize(), &m_IL);
+        result = DEVICE.GetDevice()->CreateInputLayout(layoutDesc.data()
+            , layoutDesc.size()
+            , bytecode->GetBufferPointer()
+            , bytecode->GetBufferSize()
+            , &m_IL);
+
+        COM_RELEASE(bytecode);
+        return SUCCEEDED(result);
+    }
+
+    bool CreatePS()
+    {
+        ID3D10Blob* bytecode = shader_utils::Compile(L"ps_g_pass.hlsl", "PSGMain", "ps_5_0");
+        if (!bytecode)
+        {
+            return false;
+        }
+
+        HRESULT result = DEVICE.GetDevice()->CreatePixelShader(bytecode->GetBufferPointer()
+            , bytecode->GetBufferSize()
+            , nullptr
+            , &m_PS);
+
+        COM_RELEASE(bytecode);
+        return SUCCEEDED(result);
+    }
+
+private:
+    ID3D11VertexShader* m_VS;
+    ID3D11PixelShader* m_PS;
+    ID3D11InputLayout* m_IL;
+    ID3D11Buffer* m_ConstantBuffer;
+};
+
+class LightPass
+{
+public:
+    struct LightConstantBuffer
+    {
+        XMVECTOR direction;
+    };
+
+public:
+    bool Create()
+    {
+        if (!CreateVS() || !CreatePS())
+        {
+            return false;
+        }
+
+        D3D11_SAMPLER_DESC samplerDesc;
+        ZeroMemory(&samplerDesc, sizeof(samplerDesc));
+        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samplerDesc.MipLODBias = 0.0f;
+        samplerDesc.MaxAnisotropy = 1;
+        samplerDesc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+        samplerDesc.BorderColor[0] = 0;
+        samplerDesc.BorderColor[1] = 0;
+        samplerDesc.BorderColor[2] = 0;
+        samplerDesc.BorderColor[3] = 0;
+        samplerDesc.MinLOD = 0;
+        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+        HRESULT result = DEVICE.GetDevice()->CreateSamplerState(&samplerDesc, &m_Sampler);
         RETURN_FALSE_IF(result);
 
-        D3D11_BUFFER_DESC constantDesc;
-        ZeroMemory(&constantDesc, sizeof(constantDesc));
-        constantDesc.Usage = D3D11_USAGE_DYNAMIC;
-        constantDesc.ByteWidth = sizeof(ConstantBuffer);
-        constantDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        constantDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        constantDesc.MiscFlags = 0;
-        constantDesc.StructureByteStride = 0;
+        D3D11_BUFFER_DESC desc;
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.ByteWidth = sizeof(LightConstantBuffer);
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        desc.MiscFlags = 0;
+        desc.StructureByteStride = 0;
 
-        result = DEVICE.GetDevice()->CreateBuffer(&constantDesc, nullptr, &m_ConstantBuffer);
+        result = DEVICE.GetDevice()->CreateBuffer(&desc, nullptr, &m_ConstantBuffer);
         RETURN_FALSE_IF(result);
+
+        D3D11_DEPTH_STENCIL_DESC dssDesc;
+        ZeroMemory(&dssDesc, sizeof(dssDesc));
+        dssDesc.DepthEnable = false;
+        dssDesc.StencilEnable = false;
+
+        result = DEVICE.GetDevice()->CreateDepthStencilState(&dssDesc, &m_DSS);
+        return SUCCEEDED(result);
+    }
+
+    void Bind(DeferredBuffers& buffers)
+    {
+        DEVICE.GetContext()->OMSetDepthStencilState(m_DSS, 1);
+
+        ID3D11RenderTargetView* rtv = DEVICE.GetRTV();
+        DEVICE.GetContext()->OMSetRenderTargets(1, &rtv, nullptr);
+
+        DEVICE.GetContext()->VSSetShader(m_VS, nullptr, 0);
+        DEVICE.GetContext()->PSSetShader(m_PS, nullptr, 0);
+
+        DEVICE.GetContext()->PSSetConstantBuffers(0, 1, &m_ConstantBuffer);
+        DEVICE.GetContext()->PSSetSamplers(0, 1, &m_Sampler);
+
+        ID3D11ShaderResourceView* srvNormal = buffers.GetSRV(DeferredBuffers::NORMAL);
+        DEVICE.GetContext()->PSSetShaderResources(0, 1, &srvNormal);
+
+        ID3D11ShaderResourceView* srvColor = buffers.GetSRV(DeferredBuffers::COLOR);
+        DEVICE.GetContext()->PSSetShaderResources(1, 1, &srvColor);
+
+        DEVICE.GetContext()->IASetInputLayout(m_IL);
+    }
+
+    bool SetConstantBuffer(LightConstantBuffer buffer)
+    {
+        D3D11_MAPPED_SUBRESOURCE resource;
+
+        HRESULT result = DEVICE.GetContext()->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &resource);
+        RETURN_FALSE_IF(result);
+
+        *reinterpret_cast<LightConstantBuffer*>(resource.pData) = buffer;
+        DEVICE.GetContext()->Unmap(m_ConstantBuffer, 0);
 
         return true;
     }
 
-    std::string GetCompileTarget() const override { return "vs_5_0"; }
-
 private:
-    ID3D11InputLayout* m_IL{ nullptr };
-    ID3D11Buffer* m_ConstantBuffer{ nullptr };
-};
-
-class PixelShader : public Shader<ID3D11PixelShader>
-{
-    using Parent_t = Shader<ID3D11PixelShader>;
-
-public:
-    void Bind()
+    bool CreateVS()
     {
-        DEVICE.GetContext()->PSSetShader(m_Shader, nullptr, 0);
-    }
+        ID3D10Blob* bytecode = shader_utils::Compile(L"vs_l_pass.hlsl", "VSLMain", "vs_5_0");
+        if (!bytecode)
+        {
+            return false;
+        }
 
-private:
-    bool CreateShaderObject(ID3D10Blob* bytecode)
-    {
-        HRESULT result = DEVICE.GetDevice()->CreatePixelShader(bytecode->GetBufferPointer()
+        HRESULT result = DEVICE.GetDevice()->CreateVertexShader(bytecode->GetBufferPointer()
             , bytecode->GetBufferSize()
             , nullptr
-            , &m_Shader);
+            , &m_VS);
 
+        if (FAILED(result))
+        {
+            COM_RELEASE(bytecode);
+            return false;
+        }
+
+        std::array<D3D11_INPUT_ELEMENT_DESC, 4> layoutDesc;
+        ZeroMemory(layoutDesc.data(), layoutDesc.size() * sizeof(D3D11_INPUT_ELEMENT_DESC));
+
+        layoutDesc[0].SemanticName = "POSITION";
+        layoutDesc[0].SemanticIndex = 0;
+        layoutDesc[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+        layoutDesc[0].InputSlot = 0;
+        layoutDesc[0].AlignedByteOffset = 0;
+        layoutDesc[0].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        layoutDesc[0].InstanceDataStepRate = 0;
+
+        layoutDesc[1].SemanticName = "NORMAL";
+        layoutDesc[1].SemanticIndex = 0;
+        layoutDesc[1].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+        layoutDesc[1].InputSlot = 0;
+        layoutDesc[1].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+        layoutDesc[1].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        layoutDesc[1].InstanceDataStepRate = 0;
+
+        layoutDesc[2].SemanticName = "TEXCOORD";
+        layoutDesc[2].SemanticIndex = 0;
+        layoutDesc[2].Format = DXGI_FORMAT_R32G32_FLOAT;
+        layoutDesc[2].InputSlot = 0;
+        layoutDesc[2].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+        layoutDesc[2].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        layoutDesc[2].InstanceDataStepRate = 0;
+
+        layoutDesc[3].SemanticName = "COLOR";
+        layoutDesc[3].SemanticIndex = 0;
+        layoutDesc[3].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        layoutDesc[3].InputSlot = 0;
+        layoutDesc[3].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+        layoutDesc[3].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        layoutDesc[3].InstanceDataStepRate = 0;
+
+        result = DEVICE.GetDevice()->CreateInputLayout(layoutDesc.data()
+            , layoutDesc.size()
+            , bytecode->GetBufferPointer()
+            , bytecode->GetBufferSize()
+            , &m_IL);
+
+        COM_RELEASE(bytecode);
         return SUCCEEDED(result);
     }
 
-    std::string GetCompileTarget() const override { return "ps_5_0"; }
+    bool CreatePS()
+    {
+        ID3D10Blob* bytecode = shader_utils::Compile(L"ps_l_pass.hlsl", "PSLMain", "ps_5_0");
+        if (!bytecode)
+        {
+            return false;
+        }
+
+        HRESULT result = DEVICE.GetDevice()->CreatePixelShader(bytecode->GetBufferPointer()
+            , bytecode->GetBufferSize()
+            , nullptr
+            , &m_PS);
+
+        COM_RELEASE(bytecode);
+        return SUCCEEDED(result);
+    }
+
+private:
+    ID3D11VertexShader* m_VS{ nullptr };
+    ID3D11PixelShader* m_PS{ nullptr };
+    ID3D11InputLayout* m_IL{ nullptr };
+    ID3D11DepthStencilState* m_DSS{ nullptr };
+    ID3D11Buffer* m_ConstantBuffer{ nullptr };
+    ID3D11SamplerState* m_Sampler{ nullptr };
+
 };
+
+#pragma endregion
 
 class Mesh
 {
+public:
     using IndexType_t = unsigned long;
+    using HashType_t = unsigned long long;
 
 public:
     struct Vertex
     {
-        XMFLOAT3 pos;
-        XMFLOAT3 normal;
-        XMFLOAT2 texCoord;
-        XMFLOAT4 color;
+        XMFLOAT3 pos = {0.0f, 0.0f, 0.0f};
+        XMFLOAT3 normal = {0.0f, 0.0f, 0.0f};
+        XMFLOAT2 texCoord = {0.0f, 0.0f};
+        XMFLOAT4 color = {1.0f, 0.0f, 0.0f, 1.0f};
     };
 
 public:
@@ -438,7 +833,11 @@ public:
     {
         if (CreateBuffer(sizeof(Vertex) * static_cast<UINT>(vertices.size()), vertices.data(), &m_VB, D3D11_BIND_VERTEX_BUFFER))
         {
-            return CreateBuffer(sizeof(unsigned long) * static_cast<UINT>(indices.size()), indices.data(), &m_IB, D3D11_BIND_INDEX_BUFFER);
+            if (CreateBuffer(sizeof(unsigned long) * static_cast<UINT>(indices.size()), indices.data(), &m_IB, D3D11_BIND_INDEX_BUFFER))
+            {
+                m_IndexCount = indices.size();
+                return true;
+            }
         }
 
         return false;
@@ -465,10 +864,15 @@ public:
             std::cout << "tinyobj WARNING: " << warn << std::endl;
         }
 
-        std::vector<Vertex> vertices;
+        struct HashedVertex
+        {
+            HashType_t hash;
+            Vertex vtx;
+        };
+
+        std::vector<HashedVertex> vertices;
         std::vector<IndexType_t> indices;
 
-        std::map<unsigned long, Vertex> verticesDB;
         for (const tinyobj::shape_t& shape : shapes)
         {
             for (const tinyobj::index_t& index : shape.mesh.indices)
@@ -479,38 +883,47 @@ public:
                 // Hashing: https://stackoverflow.com/questions/682438/hash-function-providing-unique-uint-from-an-integer-coordinate-pair
                 // Hashing: http://szudzik.com/ElegantPairing.pdf
 
-                const unsigned long hash = Hash(vIdx, nIdx);
+                const HashType_t hash = Hash(vIdx, nIdx);
 
-                auto it = verticesDB.find(hash);
-                if (it == verticesDB.end())
+                auto it = std::find_if(vertices.begin(), vertices.end(), [hash](const HashedVertex& vtx) { return vtx.hash == hash; });
+                if (it == vertices.end())
                 {
                     XMFLOAT3 vertex
                     {
-                        attrib.vertices[vIdx],
-                        attrib.vertices[vIdx + 1],
-                        attrib.vertices[vIdx + 2]
+                        attrib.vertices[3 * vIdx],
+                        attrib.vertices[3 * vIdx + 1],
+                        attrib.vertices[3 * vIdx + 2]
                     };
 
                     XMFLOAT3 normal
                     {
-                        attrib.normals[nIdx],
-                        attrib.normals[nIdx + 1],
-                        attrib.normals[nIdx + 2]
+                        attrib.normals[3 * nIdx],
+                        attrib.normals[3 * nIdx + 1],
+                        attrib.normals[3 * nIdx + 2]
                     };
 
-                    Vertex vtx;
-                    vtx.pos = vertex;
-                    vtx.normal = normal;
+                    HashedVertex vtx;
+                    vtx.hash = hash;
+                    vtx.vtx.pos = vertex;
+                    vtx.vtx.normal = normal;
 
-                    verticesDB[hash] = vtx;
+                    vertices.push_back(vtx);
+                    it = std::prev(vertices.end());
                 }
 
-                indices.push_back(std::distance(verticesDB.begin(), it));
+                indices.push_back(std::distance(vertices.begin(), it));
             }
         }
 
-        //#TODO: vertices.assign(verticesDB.begin(), verticesDB.end());
-        return Create(vertices, indices);
+        std::vector<Vertex> finalizedVertices;
+        finalizedVertices.reserve(vertices.size());
+
+        for (const HashedVertex& vtx : vertices)
+        {
+            finalizedVertices.push_back(vtx.vtx);
+        }
+
+        return Create(finalizedVertices, indices);
     }
 
     void Bind()
@@ -522,6 +935,8 @@ public:
         DEVICE.GetContext()->IASetIndexBuffer(m_IB, DXGI_FORMAT_R32_UINT, 0);
         DEVICE.GetContext()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
+
+    unsigned long GetIndexCount() const { return m_IndexCount; }
 
 private:
     unsigned long Hash(int a, int b)
@@ -550,6 +965,8 @@ private:
 private:
     ID3D11Buffer* m_VB{ nullptr };
     ID3D11Buffer* m_IB{ nullptr };
+
+    unsigned long m_IndexCount{ 0 };
 };
 
 class Camera
@@ -558,7 +975,7 @@ public:
     void Init(int w, int h)
     {
         m_ViewMTX = XMMatrixIdentity();
-        m_ProjectionMTX = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.0f), static_cast<float>(w) / static_cast<float>(h), 0.1f, 1000.0f);
+        m_ProjectionMTX = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.0f), static_cast<float>(w) / static_cast<float>(h), 0.1f, 100.0f);
     }
 
     void LookAt(const XMFLOAT3& pos, const XMFLOAT3& target)
@@ -592,21 +1009,37 @@ public:
         m_Camera.Init(DEVICE.GetViewport().Width, DEVICE.GetViewport().Height);
         m_Camera.LookAt(XMFLOAT3{ 3.0f, 3.0f, 3.0f }, XMFLOAT3{ 0.0f, 0.0f, 0.0f });
 
-        if (m_VS.Create(L"vs_plain_color.hlsl", "ColorVertexShader") && m_PS.Create(L"ps_plain_color.hlsl", "ColorPixelShader"))
+        std::vector<Mesh::Vertex> vertices
         {
-            std::vector<Mesh::Vertex> vertices
-            {
-                Mesh::Vertex{XMFLOAT3{-1.0f, -1.0f, 0.0f}, XMFLOAT3{}, XMFLOAT2{}, XMFLOAT4{0.0f, 0.0f, 1.0f, 1.0f}},
-                Mesh::Vertex{XMFLOAT3{1.0f, -1.0f, 0.0f}, XMFLOAT3{}, XMFLOAT2{}, XMFLOAT4{0.0f, 1.0f, 0.0f, 1.0f}},
-                Mesh::Vertex{XMFLOAT3{0.0f, 1.0f, 0.0f}, XMFLOAT3{}, XMFLOAT2{}, XMFLOAT4{1.0f, 0.0f, 0.0f, 1.0f}}
-            };
+            {XMFLOAT3{-1.0f, 1.0f, 0.0f}, XMFLOAT3{0.0f, 0.0f, 0.0f}, XMFLOAT2{0.0f, 0.0f}, XMFLOAT4{0.0f, 0.0f, 0.0f, 0.0f}},
+            {XMFLOAT3{1.0f, 1.0f, 0.0f}, XMFLOAT3{0.0f, 0.0f, 0.0f}, XMFLOAT2{1.0f, 0.0f}, XMFLOAT4{0.0f, 0.0f, 0.0f, 0.0f}},
+            {XMFLOAT3{1.0f, -1.0f, 0.0f}, XMFLOAT3{0.0f, 0.0f, 0.0f}, XMFLOAT2{1.0f, 1.0f}, XMFLOAT4{0.0f, 0.0f, 0.0f, 0.0f}},
+            {XMFLOAT3{-1.0f, -1.0f, 0.0f}, XMFLOAT3{0.0f, 0.0f, 0.0f}, XMFLOAT2{0.0f, 1.0f}, XMFLOAT4{0.0f, 0.0f, 0.0f, 0.0f}}
+        };
 
-            std::vector<unsigned long> indices
-            {
-                0, 1, 2
-            };
+        std::vector<Mesh::IndexType_t> indices
+        {
+            0, 1, 2,
+            0, 2, 3
+        };
 
-            return m_Triangle.Create(vertices, indices);
+        if (m_GPass.Create()
+            && m_LPass.Create()
+            && m_Buffers.Create()
+            && m_Mesh.Create("torus.obj")
+            && m_FullscreenQuad.Create(vertices, indices))
+        {
+            TransformConstantBuffer gPassShaderConstant;
+            gPassShaderConstant.world = XMMatrixIdentity();
+            gPassShaderConstant.view = m_Camera.GetViewMTX();
+            gPassShaderConstant.projection = m_Camera.GetProjectionMTX();
+            m_GPass.SetConstantBuffer(gPassShaderConstant);
+
+            LightPass::LightConstantBuffer lPassShaderConstant;
+            lPassShaderConstant.direction = XMVectorSet(-1.0, 1.0, -1.0, 0.0);
+            m_LPass.SetConstantBuffer(lPassShaderConstant);
+
+            return true;
         }
 
         return false;
@@ -614,27 +1047,30 @@ public:
 
     void Update(float delta)
     {
-        m_Triangle.Bind();
+        // Geometry pass
 
-        VertexShader::ConstantBuffer shaderConstant;
-        shaderConstant.world = XMMatrixIdentity();
-        shaderConstant.view = m_Camera.GetViewMTX();
-        shaderConstant.projection = m_Camera.GetProjectionMTX();
+        m_Mesh.Bind();
+        m_GPass.Bind(m_Buffers);
 
-        m_VS.SetConstantBuffer(shaderConstant);
-        m_VS.Bind();
-        m_PS.Bind();
+        DEVICE.GetContext()->DrawIndexed(m_Mesh.GetIndexCount(), 0, 0);
 
-        DEVICE.GetContext()->DrawIndexed(3, 0, 0);
+        // Light pass
+
+        m_FullscreenQuad.Bind();
+        m_LPass.Bind(m_Buffers);
+
+        DEVICE.GetContext()->DrawIndexed(m_FullscreenQuad.GetIndexCount(), 0, 0);
     }
 
 private:
     Camera m_Camera;
 
-    VertexShader m_VS;
-    PixelShader m_PS;
+    DeferredBuffers m_Buffers;
+    GeometryPass m_GPass;
+    LightPass m_LPass;
 
-    Mesh m_Triangle;
+    Mesh m_Mesh;
+    Mesh m_FullscreenQuad;
 };
 
 int main(int argc, char** argv)
@@ -644,8 +1080,8 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    const int WindowWidth = 1920;
-    const int WindowHeight = 1080;
+    const int WindowWidth = 1920 * 0.5f;
+    const int WindowHeight = 1080 * 0.5f;
 
     SDL_Window* sdlWindow = SDL_CreateWindow("deferred_rendering"
         , SDL_WINDOWPOS_CENTERED
@@ -661,9 +1097,14 @@ int main(int argc, char** argv)
     Scene scene;
     if (DEVICE.Init(wmInfo.info.win.window, WindowWidth, WindowHeight) && scene.Init())
     {
+        const float FrameTime = 1.0f / 60.0f;
+        float delta = 0.0f;
+
         bool isRunning = true;
         while (isRunning)
         {
+            Uint64 start = SDL_GetTicks64();
+
             SDL_Event event;
             if (SDL_PollEvent(&event))
             {
@@ -681,8 +1122,16 @@ int main(int argc, char** argv)
             }
 
             DEVICE.BeforeFrame();
-            scene.Update(0.0f);
+            scene.Update(delta);
             DEVICE.Present();
+
+            float epleased = static_cast<float>(SDL_GetTicks64() - start) / 1000.0f;
+            if (epleased < FrameTime)
+            {
+                Sleep((FrameTime - epleased) * 1000.0f);
+            }
+
+            delta = static_cast<float>(SDL_GetTicks64() - start) / 1000.0f;
         }
     }
 
