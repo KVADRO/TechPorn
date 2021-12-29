@@ -1,3 +1,408 @@
+#define GL_GLEXT_PROTOTYPES
+
+#include <SDL.h>
+#include <SDL_opengl.h>
+
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <array>
+
+#include "Mesh.h"
+
+class Program;
+class Shader
+{
+    friend class Program;
+    
+public:
+    ~Shader()
+    {
+        glDeleteShader(m_Handle);
+    }
+    
+    bool Create(const std::string& path, GLenum type)
+    {
+        std::ifstream file(path);
+        if(!file.is_open())
+        {
+            return false;
+        }
+        
+        std::stringstream stream;
+        stream << file.rdbuf();
+        
+        const std::string content = stream.str();
+        const GLchar* contentBuff = content.c_str();
+        
+        m_Handle = glCreateShader(type);
+        glShaderSource(m_Handle, 1, &contentBuff, nullptr);
+        glCompileShader(m_Handle);
+        
+        GLint compiled = 0;
+        glGetShaderiv(m_Handle, GL_COMPILE_STATUS, &compiled);
+        
+        if(!compiled)
+        {
+            char log[512] = {0};
+            glGetShaderInfoLog(m_Handle, 512, nullptr, log);
+            
+            std::cout << "Shader error: " << log << std::endl;
+            return false;
+        }
+        
+        return true;
+    }
+    
+private:
+    GLuint m_Handle{0};
+};
+
+class Program
+{
+public:
+    ~Program()
+    {
+        glDeleteProgram(m_Program);
+    }
+    
+    bool Create(const std::string& vsPath, const std::string& fsPath)
+    {
+        Shader vs;
+        if(!vs.Create(vsPath, GL_VERTEX_SHADER))
+        {
+            return false;
+        }
+        
+        Shader fs;
+        if(!fs.Create(fsPath, GL_FRAGMENT_SHADER))
+        {
+            return false;
+        }
+        
+        m_Program = glCreateProgram();
+        glAttachShader(m_Program, vs.m_Handle);
+        glAttachShader(m_Program, fs.m_Handle);
+        glLinkProgram(m_Program);
+        
+        int linked = 0;
+        glGetProgramiv(m_Program, GL_LINK_STATUS, &linked);
+        
+        if(!linked)
+        {
+            char log[512] = {0};
+            glGetProgramInfoLog(m_Program, 512, nullptr, log);
+            
+            std::cout << "Program link error: " << log << std::endl;
+            return false;
+        }
+        
+        glDetachShader(m_Program, vs.m_Handle);
+        glDetachShader(m_Program, fs.m_Handle);
+        
+        return true;
+    }
+    
+    void Bind()
+    {
+        glUseProgram(m_Program);
+    }
+    
+    template<typename T>
+    void Set(const T& object, const std::string& name);
+    
+    template<>
+    void Set(const glm::mat4& object, const std::string& name)
+    {
+        glUniformMatrix4fv(glGetUniformLocation(m_Program, name.c_str()), 1, GL_FALSE, &object[0][0]);
+    }
+    
+    template<>
+    void Set(const GLint& object, const std::string& name)
+    {
+        glUniform1i(glGetUniformLocation(m_Program, name.c_str()), object);
+    }
+    
+private:
+    GLuint m_Program{0};
+};
+
+class GBuffer
+{
+public:
+    enum Attachment
+    {
+        POSITION = 0,
+        NORMAL,
+        ALBEDO,
+        DEPTH,
+        
+        COUNT
+    };
+    
+public:
+    ~GBuffer()
+    {
+        //#TODO: Do i need to remove attachments manually?
+        glDeleteFramebuffers(1, &m_FBO);
+    }
+    
+    bool Create(int w, int h)
+    {
+        glGenFramebuffers(1, &m_FBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_FBO);
+        
+        GLuint& position = m_Attachments[POSITION];
+        glGenTextures(1, &position);
+        glBindTexture(GL_TEXTURE_2D, position);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, position, 0);
+        
+        GLuint& normal = m_Attachments[NORMAL];
+        glGenTextures(1, &normal);
+        glBindTexture(GL_TEXTURE_2D, normal);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, normal, 0);
+        
+        GLuint& albedo = m_Attachments[ALBEDO];
+        glGenTextures(1, &albedo);
+        glBindTexture(GL_TEXTURE_2D, albedo);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, albedo, 0);
+        
+        GLuint& depth = m_Attachments[DEPTH];
+        glGenTextures(1, &depth);
+        glBindTexture(GL_TEXTURE_2D, depth);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, w, h, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+        
+        GLuint renderbuffers[] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+        glDrawBuffers(3, renderbuffers);
+        
+        const bool result = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        
+        return result;
+    }
+    
+    GLuint GetFBO() const { return m_FBO; }
+    GLuint GetAttachment(Attachment type) const { return m_Attachments[type]; }
+    
+private:
+    GLuint m_FBO{0};
+    std::array<GLuint, COUNT> m_Attachments;
+};
+
+class Camera
+{
+public:
+    void Init(int w, int h)
+    {
+        const float aspect = static_cast<float>(w) / static_cast<float>(h);
+        m_ProjectionMTX = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 100.0f);
+    }
+
+    void LookAt(const glm::vec3& pos, const glm::vec3& target)
+    {
+        m_ViewMTX = glm::lookAt(pos, target, glm::vec3{0.0f, 1.0f, 0.0f});
+    }
+
+    const glm::vec3& GetPos() const { return m_Pos; }
+    const glm::vec3& GetView() const { return m_View; }
+
+    const glm::mat4& GetViewMTX() const { return m_ViewMTX; }
+    const glm::mat4& GetProjectionMTX() const { return m_ProjectionMTX; }
+
+private:
+    glm::vec3 m_Pos;
+    glm::vec3 m_View;
+
+    glm::mat4 m_ViewMTX;
+    glm::mat4 m_ProjectionMTX;
+};
+
+class Scene
+{
+public:
+    bool Create(int w, int h)
+    {
+        m_Camera.Init(w, h);
+        m_Camera.LookAt(glm::vec3{ 3.0f, 3.0f, 3.0f }, glm::vec3{ 0.0f, 0.0f, 0.0f });
+        
+        if(!m_GPass.Create("shaders/g_pass.vs", "shaders/g_pass.fs") || !m_LPass.Create("shaders/l_pass.vs", "shaders/l_pass.fs"))
+        {
+            return false;
+        }
+        
+        m_LPass.Set(0, "uPosition");
+        m_LPass.Set(1, "uNormal");
+        m_LPass.Set(2, "uAlbedo");
+        
+        if(!m_GBuffer.Create(w, h))
+        {
+            return false;
+        }
+        
+        std::vector<Mesh::Vertex> triangle =
+        {
+            {glm::vec3{-1.0f, 1.0f, 0.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec2{0.0f, 0.0f}, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}},
+            {glm::vec3{1.0f, 1.0f, 0.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec2{0.0f, 0.0f}, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}},
+            {glm::vec3{1.0f, -1.0f, 0.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec2{0.0f, 0.0f}, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}},
+            {glm::vec3{-1.0f, -1.0f, 0.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec2{0.0f, 0.0f}, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}},
+        };
+        
+        std::vector<Mesh::IndexType_t> indices =
+        {
+            0, 1, 2,
+            0, 2, 3
+        };
+        
+        if(!m_FullScreenQuad.Create(triangle, indices))
+        {
+            return false;
+        }
+        
+        m_Spheres.resize(1);
+        if(!m_Spheres[0].Create("meshes/torus.mesh"))
+        {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    void Update(float delta)
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_GBuffer.GetFBO());
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        
+        m_GPass.Bind();
+        m_GPass.Set(m_Camera.GetProjectionMTX(), "uPMtx");
+        m_GPass.Set(m_Camera.GetViewMTX(), "uVMtx");
+
+        for(Mesh& sphere : m_Spheres)
+        {
+            m_GPass.Set(glm::mat4{}, "uMMtx");
+            sphere.Render();
+        }
+        
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glDisable(GL_DEPTH_TEST);
+
+        m_LPass.Bind();
+        
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_GBuffer.GetAttachment(GBuffer::POSITION));
+        
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, m_GBuffer.GetAttachment(GBuffer::NORMAL));
+        
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, m_GBuffer.GetAttachment(GBuffer::ALBEDO));
+        
+        m_FullScreenQuad.Render();
+        
+        //#TODO: Copy depth buffer from GPass and render light sources
+    }
+    
+private:
+    Camera m_Camera;
+
+    Program m_GPass;
+    std::vector<Mesh> m_Spheres;
+    
+    Program m_LPass;
+    Mesh m_FullScreenQuad;
+    
+    GBuffer m_GBuffer;
+};
+
+int main( int argc, char * argv[] )
+{
+    SDL_Init( SDL_INIT_VIDEO );
+    SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
+    SDL_GL_SetAttribute( SDL_GL_ACCELERATED_VISUAL, 1 );
+    SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
+    SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 8 );
+    SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 8 );
+    SDL_GL_SetAttribute( SDL_GL_ALPHA_SIZE, 8 );
+    SDL_GL_SetAttribute( SDL_GL_DEPTH_SIZE, 24 );
+    SDL_GL_SetAttribute( SDL_GL_STENCIL_SIZE, 8 );
+    SDL_GL_SetAttribute( SDL_GL_CONTEXT_MAJOR_VERSION, 3 );
+    SDL_GL_SetAttribute( SDL_GL_CONTEXT_MINOR_VERSION, 3 );
+    SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE );
+
+    static const int width = 800;
+    static const int height = 600;
+
+    SDL_Window * window = SDL_CreateWindow(""
+                                           , SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED
+                                           , width, height
+                                           , SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+    
+    SDL_GLContext context = SDL_GL_CreateContext( window );
+    std::cout << "GL_SHADING_LANGUAGE_VERSION: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
+    
+    const float FrameTime = 1.0f / 60.0f;
+    float delta = 0.0f;
+    
+    Scene scene;
+    if(scene.Create(width, height))
+    {
+        bool shouldQuit = false;
+        while(!shouldQuit)
+        {
+            Uint64 start = SDL_GetTicks64();
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+            SDL_Event event;
+            while( SDL_PollEvent( &event ) )
+            {
+                switch( event.type )
+                {
+                    case SDL_QUIT:
+                        shouldQuit = true;
+                        break;
+                }
+            }
+            
+            scene.Update(delta);
+            
+            SDL_GL_SwapWindow( window );
+            SDL_Delay( 1 );
+            
+            float epleased = static_cast<float>(SDL_GetTicks64() - start) / 1000.0f;
+            if (epleased < FrameTime)
+            {
+                SDL_Delay((FrameTime - epleased) * 1000.0f);
+            }
+
+            delta = static_cast<float>(SDL_GetTicks64() - start) / 1000.0f;
+        }
+    }
+    
+    SDL_GL_DeleteContext( context );
+    SDL_DestroyWindow( window );
+    SDL_Quit();
+
+    return 0;
+}
+
+#if 0
+
 #include <SDL.h>
 #include <SDL_syswm.h>
 
@@ -1140,3 +1545,5 @@ int main(int argc, char** argv)
 
     return 0;
 }
+
+#endif
